@@ -1,14 +1,4 @@
-# c.py
-"""
-PDF Chat app — CPU-friendly, robust embedding + chromadb collection usage.
-Key improvements for low-RAM CPU:
-- Small default batch size (32) and 2 workers
-- Use sentence-transformers encode with batching; fallback to HuggingFaceEmbeddings if not present
-- Create a fresh chroma collection each process_pdfs run using chromadb.Client().collection.add(...)
-- Query by computing query-embedding and calling collection.query(...)
-- Avoid any attempt to "patch" embeddings into LangChain internals (prevents misalignment bugs)
-Functionality (UI, API) preserved from previous version.
-"""
+
 import os
 import time
 import traceback
@@ -48,14 +38,13 @@ try:
 except Exception:
     # If patch doesn't apply, continue — gradio may still work.
     pass
-
-# -- Config (tune for your machine) --
+    
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))   # small for 8GB RAM
 EMBEDDING_NUM_WORKERS = int(os.environ.get("EMBEDDING_NUM_WORKERS", "2"))
 EMBEDDING_NORMALIZE = os.environ.get("EMBEDDING_NORMALIZE", "true").lower() in ("1", "true", "yes")
 
-# -- Optional imports --
+
 try:
     from sentence_transformers import SentenceTransformer
     import torch
@@ -73,7 +62,6 @@ except Exception:
     _HAS_HF_EMBED = False
 
 try:
-    # prefer chromadb client directly for consistent add/query API
     import chromadb
     from chromadb.config import Settings as ChromaSettings
     _HAS_CHROMADB = True
@@ -130,8 +118,6 @@ def initialize_embeddings(force=False):
             # last resort: try default name without path
             _sentence_model = SentenceTransformer(EMBEDDING_MODEL.split("/")[-1], device=device)
         def _encode(texts, batch_size=EMBEDDING_BATCH_SIZE, num_workers=EMBEDDING_NUM_WORKERS):
-            # convert_to_numpy returns numpy arrays; normalize if requested
-            # show_progress_bar False for background usage
             return _sentence_model.encode(
                 texts,
                 batch_size=batch_size,
@@ -194,10 +180,6 @@ def docs_to_texts_and_meta(docs):
 
 # -- Core: process_pdfs (load, split, embed, add to chroma) --
 def process_pdfs(files):
-    """
-    files: list of uploaded file objects from Gradio (each has .name)
-    Returns status string.
-    """
     global _current_collection_name, _current_collection
     if not files:
         return "Upload at least one PDF."
@@ -232,8 +214,6 @@ def process_pdfs(files):
 
     # texts + metadatas
     texts, metadatas = docs_to_texts_and_meta(all_docs)
-
-    # compute embeddings in small batches (safe on 8GB)
     try:
         encode = _embedding_runner["encode"]
         embeddings = encode(texts, batch_size=EMBEDDING_BATCH_SIZE, num_workers=EMBEDDING_NUM_WORKERS)
@@ -270,8 +250,6 @@ def process_pdfs(files):
         collection = client.create_collection(name=name)
         # prepare ids (unique)
         ids = [str(i) for i in range(len(texts))]
-        # add to collection (documents are the full text chunks we embed)
-        # chromadb expects embeddings as list[list[float]]
         collection.add(
             ids=ids,
             documents=texts,
@@ -286,7 +264,7 @@ def process_pdfs(files):
         tb = traceback.format_exc()
         return f"Failed to create chroma collection or add vectors: {e}\n{tb}"
 
-# -- Gemini client helper (same pattern as before) --
+#  Gemini client helper
 def _init_genai_client(api_key_env="GEMINI_API_KEY"):
     if genai is None:
         raise ImportError("GenAI/Gemini SDK not installed. Run: pip install google-genai (or genai).")
@@ -334,9 +312,6 @@ def _call_gemini_with_retries(client, model_name, prompt, max_attempts=3, base_d
 
 # -- Chat: compute query embedding, query chroma collection, build prompt, call Gemini --
 def chat_response(message, history):
-    """
-    Returns text answer. Requires process_pdfs to have been called.
-    """
     global _current_collection
     if _current_collection is None:
         return "Please upload and process PDF documents first."
@@ -355,7 +330,7 @@ def chat_response(message, history):
             q_emb = encode([message], EMBEDDING_BATCH_SIZE)[0].tolist()
 
         # query the collection
-        # request top k documents; tune k=3
+        # request top k documents; tune k=5
         query_res = _current_collection.query(query_embeddings=[q_emb], n_results=5, include=["documents", "metadatas", "distances"])
         documents = []
         if query_res and "documents" in query_res and len(query_res["documents"]) > 0:
